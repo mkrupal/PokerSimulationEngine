@@ -25,10 +25,46 @@ public class HandNormalizer {
         }
     }
     
+    // Performance profiler for normalization
+    private static class NormalizationProfiler {
+        long totalSort = 0;
+        long totalSuitMapping = 0;
+        long totalNormalization = 0;
+        long totalFinalSort = 0;
+        int count = 0;
+        
+        void record(long sort, long suitMap, long norm, long finalSort) {
+            totalSort += sort;
+            totalSuitMapping += suitMap;
+            totalNormalization += norm;
+            totalFinalSort += finalSort;
+            count++;
+        }
+        
+        void printStats() {
+            if (count == 0) return;
+            long total = totalSort + totalSuitMapping + totalNormalization + totalFinalSort;
+            System.out.println("\n=== HandNormalizer Profiling ===");
+            System.out.printf("Initial Sort: %.4fms (%.1f%%)\n", (double)totalSort/count/1e6, 100.0*totalSort/total);
+            System.out.printf("Suit Mapping: %.4fms (%.1f%%)\n", (double)totalSuitMapping/count/1e6, 100.0*totalSuitMapping/total);
+            System.out.printf("Normalization: %.4fms (%.1f%%)\n", (double)totalNormalization/count/1e6, 100.0*totalNormalization/total);
+            System.out.printf("Final Sort: %.4fms (%.1f%%)\n", (double)totalFinalSort/count/1e6, 100.0*totalFinalSort/total);
+            System.out.printf("Total per normalization: %.4fms\n", (double)total/count/1e6);
+        }
+    }
+    
+    private static final NormalizationProfiler profiler = new NormalizationProfiler();
+    
+    public static void printProfilerStats() {
+        profiler.printStats();
+    }
+    
     /**
      * Generic method to normalize any number of cards and return suit mapping
      */
     public NormalizationResult normalizeHand(String[] cards) {
+        long t0 = System.nanoTime();
+        
         if (cards == null || cards.length == 0) {
             return new NormalizationResult(cards, new HashMap<>());
         }
@@ -41,19 +77,24 @@ public class HandNormalizer {
             if (rankA != rankB) {
                 return Integer.compare(rankB, rankA); // High to low
             }
-            return Character.compare(a.charAt(1), b.charAt(1)); // suit order
+            return Character.compare(a.charAt(1), b.charAt(1)); // Then by suit
         });
         
-        // Step 2: Assign canonical suits globally in the order suits appear in the sorted hand, never overwrite
-        char[] canonicalSuits = {'s', 'h', 'd', 'c'};
+        long t1 = System.nanoTime();
+        
+        // Step 2: Create suit mapping
         Map<Character, Character> suitToCanonical = new HashMap<>();
-        int nextCanonical = 0;
+        char[] canonicalSuits = {'s', 'h', 'd', 'c'};
+        int canonicalIndex = 0;
+        
         for (String card : sortedCards) {
             char suit = card.charAt(1);
             if (!suitToCanonical.containsKey(suit)) {
-                suitToCanonical.put(suit, canonicalSuits[nextCanonical++]);
+                suitToCanonical.put(suit, canonicalSuits[canonicalIndex++]);
             }
         }
+        
+        long t2 = System.nanoTime();
         
         // Step 3: For each rank group, assign canonical suits in canonical order to the suits in that group (in sorted order)
         Map<Character, List<Integer>> rankToIndices = new HashMap<>();
@@ -95,6 +136,8 @@ public class HandNormalizer {
             }
         }
         
+        long t3 = System.nanoTime();
+        
         // Step 4: Normalize all cards using the mapping (for same-rank groups, use local mapping)
         String[] normalized = new String[cards.length];
         for (int i = 0; i < cards.length; i++) {
@@ -114,6 +157,8 @@ public class HandNormalizer {
             normalized[i] = rank + "" + canonicalSuit;
         }
         
+        long t4 = System.nanoTime();
+        
         // Step 5: Sort the normalized cards by rank (high to low), then by canonical suit order s < h < d < c
         Arrays.sort(normalized, (a, b) -> {
             int rankA = getRankValue(a.charAt(0));
@@ -128,6 +173,10 @@ public class HandNormalizer {
             }
             return Integer.compare(suitA, suitB);
         });
+        
+        long t5 = System.nanoTime();
+        
+        profiler.record(t1-t0, t2-t1, t4-t3, t5-t4);
         
         return new NormalizationResult(normalized, suitMap);
     }

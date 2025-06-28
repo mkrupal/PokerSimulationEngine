@@ -12,7 +12,7 @@ public class PLOSimulationEngine {
     }
     
     public static void main(String[] args) {
-        args = new String[] {"KsKh8d7c", "AsAc5d5c"};
+        args = new String[] {"AsAd6h6s"};
         if (args.length < 1) {
             System.out.println("Usage: java PLOSimulationEngine <hero_hand> [villain_hand1] [villain_hand2] ...");
             System.out.println("Example: java PLOSimulationEngine Ks9h8h7s");
@@ -35,12 +35,28 @@ public class PLOSimulationEngine {
             }
         }
         
-        double winRate = engine.simulate(heroHand, villainHands, 10000);
-        System.out.printf("Hero win rate: %.2f%%%n", winRate * 100);
+        SimulationResult result = engine.simulateAdaptive(heroHand, villainHands);
+        System.out.printf("Final Result: %.4f%% (SD: %.4f%%, CI: %.4f%%, Simulations: %d)%n", 
+                         result.winRate * 100, result.standardDeviation * 100, 
+                         result.confidenceInterval * 100, result.iterations);
     }
     
-    public double simulate(String heroHand, String[] villainHands, int iterations) {
-        System.out.println("Running PLO simulation...");
+    public static class SimulationResult {
+        public final double winRate;
+        public final double standardDeviation;
+        public final double confidenceInterval;
+        public final int iterations;
+        
+        public SimulationResult(double winRate, double standardDeviation, double confidenceInterval, int iterations) {
+            this.winRate = winRate;
+            this.standardDeviation = standardDeviation;
+            this.confidenceInterval = confidenceInterval;
+            this.iterations = iterations;
+        }
+    }
+    
+    public SimulationResult simulateAdaptive(String heroHand, String[] villainHands) {
+        System.out.println("Running adaptive PLO simulation...");
         System.out.println("Hero: " + heroHand);
         
         // Validate card conflicts
@@ -48,48 +64,85 @@ public class PLOSimulationEngine {
             throw new IllegalArgumentException("Card conflict detected! Players cannot share cards.");
         }
         
-        // If no villain hands provided, generate random ones
-        if (villainHands.length == 0) {
-            System.out.println("No villain hands specified. Generating 5 random villain hands.");
-            villainHands = generateRandomVillainHands(heroHand, 5);
+        // If no villain hands provided, we'll generate them dynamically for each simulation
+        boolean generateRandomVillains = villainHands.length == 0;
+        if (generateRandomVillains) {
+            System.out.println("No villain hands specified. Will generate 1 random villain hand for each simulation.");
         }
         
         for (int i = 0; i < villainHands.length; i++) {
             System.out.println("Villain " + (i + 1) + ": " + villainHands[i]);
         }
-        System.out.println("Iterations: " + iterations);
-        
-        // Initialize performance tracking (sample first 100 iterations)
-        this.performanceStats = new PerformanceStats();
         
         int heroWins = 0;
+        int iterations = 0;
+        final int MAX_ITERATIONS = 1_000_000;
         
-        for (int i = 0; i < iterations; i++) {
-            if (i % 1000 == 0) {
-                System.out.println("Completed " + i + " iterations...");
+        while (iterations < MAX_ITERATIONS) {
+            iterations++;
+            
+            // Generate new random villain hands for each simulation if needed
+            String[] currentVillainHands = villainHands;
+            if (generateRandomVillains) {
+                currentVillainHands = generateRandomVillainHands(heroHand, 1);
             }
             
-            if (simulateOneHand(heroHand, villainHands)) {
+            if (simulateOneHand(heroHand, currentVillainHands)) {
                 heroWins++;
             }
             
-            // Stop performance tracking after 100 samples to avoid overhead
-            if (i == 99) {
-                this.performanceStats.printStats();
-                this.performanceStats = null;
+            // Check if we should log progress (logarithmic intervals)
+            boolean shouldLog = shouldLogIteration(iterations);
+            
+            if (shouldLog) {
+                double winRate = (double) heroWins / iterations;
+                double standardDeviation = calculateStandardDeviation(winRate, iterations);
+                double confidenceInterval = calculateConfidenceInterval(standardDeviation, iterations);
+                
+                System.out.printf("Iteration %d: Win Rate: %.4f%%, SD: %.4f%%, CI: %.4f%%%n", 
+                                iterations, winRate * 100, standardDeviation * 100, confidenceInterval * 100);
+                
+                // Check stopping criteria
+                if (standardDeviation < 0.01 && confidenceInterval < 0.02) {
+                    System.out.println("Stopping criteria met!");
+                    break;
+                }
             }
         }
         
-        // Print performance stats if still tracking
-        if (this.performanceStats != null) {
-            this.performanceStats.printStats();
-        }
-        // Print cache lookup profiler stats
-        PokerHandCache.printProfilerStats();
+        // Calculate final statistics
+        double finalWinRate = (double) heroWins / iterations;
+        double finalStandardDeviation = calculateStandardDeviation(finalWinRate, iterations);
+        double finalConfidenceInterval = calculateConfidenceInterval(finalStandardDeviation, iterations);
         
-        double winRate = (double) heroWins / iterations;
         System.out.println("Hero wins: " + heroWins + "/" + iterations);
-        return winRate;
+        
+        return new SimulationResult(finalWinRate, finalStandardDeviation, finalConfidenceInterval, iterations);
+    }
+    
+    private boolean shouldLogIteration(int iteration) {
+        if (iteration <= 1000) {
+            return iteration % 100 == 0;
+        } else if (iteration <= 10000) {
+            return iteration % 1000 == 0;
+        } else if (iteration <= 100000) {
+            return iteration % 10000 == 0;
+        } else if (iteration <= 1000000) {
+            return iteration % 100000 == 0;
+        } else {
+            return iteration % 1000000 == 0;
+        }
+    }
+    
+    private double calculateStandardDeviation(double winRate, int iterations) {
+        // For binomial distribution, SD = sqrt(p * (1-p) / n)
+        return Math.sqrt(winRate * (1 - winRate) / iterations);
+    }
+    
+    private double calculateConfidenceInterval(double standardDeviation, int iterations) {
+        // 95% confidence interval = 1.96 * standard error
+        // Standard error = standard deviation
+        return 1.96 * standardDeviation;
     }
     
     private boolean validateNoCardConflicts(String heroHand, String[] villainHands) {
@@ -185,16 +238,6 @@ public class PLOSimulationEngine {
         
         long evaluationTime = System.currentTimeMillis();
         
-        // Performance profiling (only for first few iterations to avoid spam)
-        if (performanceStats != null) {
-            performanceStats.recordTimes(
-                deckCreationTime - startTime,
-                shuffleTime - deckCreationTime,
-                dealTime - shuffleTime,
-                evaluationTime - dealTime
-            );
-        }
-        
         // Check if hero wins (lower rank number = better hand)
         for (int villainRank : villainRanks) {
             if (villainRank < heroBestRank) {
@@ -268,43 +311,4 @@ public class PLOSimulationEngine {
         
         return bestRank;
     }
-    
-    // Performance tracking class
-    private static class PerformanceStats {
-        private long totalDeckCreation = 0;
-        private long totalShuffle = 0;
-        private long totalDeal = 0;
-        private long totalEvaluation = 0;
-        private int sampleCount = 0;
-        
-        public void recordTimes(long deckCreation, long shuffle, long deal, long evaluation) {
-            totalDeckCreation += deckCreation;
-            totalShuffle += shuffle;
-            totalDeal += deal;
-            totalEvaluation += evaluation;
-            sampleCount++;
-        }
-        
-        public void printStats() {
-            if (sampleCount == 0) return;
-            
-            System.out.println("\n=== Performance Breakdown (per simulation) ===");
-            System.out.printf("Deck Creation: %.2fms (%.1f%%)%n", 
-                (double) totalDeckCreation / sampleCount, 
-                (double) totalDeckCreation / (totalDeckCreation + totalShuffle + totalDeal + totalEvaluation) * 100);
-            System.out.printf("Shuffle: %.2fms (%.1f%%)%n", 
-                (double) totalShuffle / sampleCount,
-                (double) totalShuffle / (totalDeckCreation + totalShuffle + totalDeal + totalEvaluation) * 100);
-            System.out.printf("Deal: %.2fms (%.1f%%)%n", 
-                (double) totalDeal / sampleCount,
-                (double) totalDeal / (totalDeckCreation + totalShuffle + totalDeal + totalEvaluation) * 100);
-            System.out.printf("Evaluation: %.2fms (%.1f%%)%n", 
-                (double) totalEvaluation / sampleCount,
-                (double) totalEvaluation / (totalDeckCreation + totalShuffle + totalDeal + totalEvaluation) * 100);
-            System.out.printf("Total per simulation: %.2fms%n", 
-                (double) (totalDeckCreation + totalShuffle + totalDeal + totalEvaluation) / sampleCount);
-        }
-    }
-    
-    private PerformanceStats performanceStats;
 } 

@@ -12,12 +12,8 @@ public class PLOSimulationTest {
         
         // Only valid test cases (no card conflicts)
         String[][] testData = {
-
             {"KsKh8d7c", "AsAc5d5c", "KK vs AA classic"}
         };
-        
-        long totalStartTime = System.currentTimeMillis();
-        int totalIterations = 0;
         
         for (int i = 0; i < testData.length; i++) {
             String[] testCase = testData[i];
@@ -43,26 +39,11 @@ public class PLOSimulationTest {
                 System.out.println("Villain " + (v + 1) + ": " + villainHands[v]);
             }
             
-            long startTime = System.currentTimeMillis();
-            double winRate = engine.simulate(heroHand, villainHands, 10000);
-            long endTime = System.currentTimeMillis();
-            long evalTime = endTime - startTime;
+            PLOSimulationEngine.SimulationResult result = engine.simulateAdaptive(heroHand, villainHands);
             
-            System.out.println("Win Rate: " + String.format("%.2f%%", winRate * 100));
-            System.out.println("Evaluation Time: " + evalTime + "ms");
-            
-            totalIterations += 10000;
+            System.out.println("Final Result: " + String.format("%.4f%% (SD: %.4f%%, CI: %.4f%%, Simulations: %d)", 
+                result.winRate * 100, result.standardDeviation * 100, result.confidenceInterval * 100, result.iterations));
         }
-        
-        long totalEndTime = System.currentTimeMillis();
-        long totalEvalTime = totalEndTime - totalStartTime;
-        
-        System.out.println("\n=== Summary ===");
-        System.out.println("Total Test Cases: " + testData.length);
-        System.out.println("Total Iterations: " + totalIterations);
-        System.out.println("Total Evaluation Time: " + totalEvalTime + "ms");
-        System.out.println("Average Time per Test: " + (totalEvalTime / testData.length) + "ms");
-        System.out.println("Average Time per 10k Iterations: " + (totalEvalTime * 10000 / totalIterations) + "ms");
     }
 
     @Test
@@ -92,7 +73,7 @@ public class PLOSimulationTest {
                 System.out.println("Villain " + (v + 1) + ": " + villainHands[v]);
             }
             try {
-                engine.simulate(heroHand, villainHands, 10000);
+                engine.simulateAdaptive(heroHand, villainHands);
                 System.out.println("❌ FAILED: Expected card conflict error but simulation ran successfully");
             } catch (IllegalArgumentException e) {
                 System.out.println("✅ PASSED: Card conflict correctly detected: " + e.getMessage());
@@ -114,9 +95,11 @@ public class PLOSimulationTest {
             System.out.println("Villain " + (i + 1) + ": " + villainHands[i]);
         }
         
-        double winRate = engine.simulate(heroHand, villainHands, 5000);
+        PLOSimulationEngine.SimulationResult result = engine.simulateAdaptive(heroHand, villainHands);
         
         System.out.println("=== Results ===");
-        System.out.printf("Hero win rate: %.2f%%%n", winRate * 100);
+        System.out.printf("Hero win rate: %.4f%% (SD: %.4f%%, CI: %.4f%%, Simulations: %d)%n", 
+                         result.winRate * 100, result.standardDeviation * 100, 
+                         result.confidenceInterval * 100, result.iterations);
     }
 } 
