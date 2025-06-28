@@ -13,7 +13,7 @@ public class PokerHandGenerator {
     
     public static void main(String[] args) {
         PokerHandGenerator generator = new PokerHandGenerator();
-        generator.generateAllHands("all_poker_hands.txt");
+        generator.generateAllHands("normalized_ranked_poker_hands.txt");
     }
     
     public void generateAllHands(String filename) {
