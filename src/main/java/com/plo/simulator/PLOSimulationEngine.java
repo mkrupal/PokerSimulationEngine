@@ -1,6 +1,7 @@
 package com.plo.simulator;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 public class PLOSimulationEngine {
     
@@ -12,96 +13,136 @@ public class PLOSimulationEngine {
     private static final double DEFAULT_STOPPING_SD = 0.005; // 0.5% standard deviation threshold
     private static final double DEFAULT_STOPPING_CI = 0.01; // 1% confidence interval threshold
     private static final int MIN_ITERATIONS = 100; // Minimum iterations before allowing early stopping
-    
-    public PLOSimulationEngine() {
-        this.handCache = new PokerHandCache();
-        this.fullDeck = initializeFullDeck();
-    }
-    
-    private Set<String> initializeFullDeck() {
-        Set<String> deck = new HashSet<>();
-        String[] ranks = {"2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"};
-        String[] suits = {"c", "d", "h", "s"};
+    private static final int SIMULATION_BATCH_SIZE = 100;
         
-        for (String suit : suits) {
-            for (String rank : ranks) {
-                deck.add(rank + suit);
+        public PLOSimulationEngine() {
+            this.handCache = new PokerHandCache();
+            this.fullDeck = initializeFullDeck();
+        }
+        
+        private Set<String> initializeFullDeck() {
+            Set<String> deck = new HashSet<>();
+            String[] ranks = {"2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"};
+            String[] suits = {"c", "d", "h", "s"};
+            
+            for (String suit : suits) {
+                for (String rank : ranks) {
+                    deck.add(rank + suit);
+                }
             }
-        }
-        return deck;
-    }
-    
-    public static class SimulationResult {
-        public final double winRate;
-        public final double standardDeviation;
-        public final double confidenceInterval;
-        public final int iterations;
-        
-        public SimulationResult(double winRate, double standardDeviation, double confidenceInterval, int iterations) {
-            this.winRate = winRate;
-            this.standardDeviation = standardDeviation;
-            this.confidenceInterval = confidenceInterval;
-            this.iterations = iterations;
-        }
-    }
-    
-    public SimulationResult simulateAdaptive(String heroHand, List<String> villainHands) {
-        return simulateAdaptive(heroHand, villainHands, 1);
-    }
-    
-    public SimulationResult simulateAdaptive(String heroHand, List<String> villainHands, int numThreads) {
-        if (numThreads <= 1) {
-            return simulateAdaptiveSingleThread(heroHand, villainHands);
+            return deck;
         }
         
-        return simulateAdaptiveParallel(heroHand, villainHands, numThreads);
-    }
-    
-    private SimulationResult simulateAdaptiveSingleThread(String heroHand, List<String> villainHands) {
-        // Validate input cards and build removeFromDeck set
-        Set<String> removeFromDeck = new HashSet<>();
-        validateAndCollectCards(heroHand, "Hero", removeFromDeck);
-        
-        if (villainHands != null && !villainHands.isEmpty()) {
-            for (int i = 0; i < villainHands.size(); i++) {
-                validateAndCollectCards(villainHands.get(i), "Villain " + (i + 1), removeFromDeck);
+        public static class SimulationResult {
+            public final double winRate;
+            public final double standardDeviation;
+            public final double confidenceInterval;
+            public final int iterations;
+            
+            public SimulationResult(double winRate, double standardDeviation, double confidenceInterval, int iterations) {
+                this.winRate = winRate;
+                this.standardDeviation = standardDeviation;
+                this.confidenceInterval = confidenceInterval;
+                this.iterations = iterations;
             }
         }
         
-        // Create deck without hero and villain cards
-        List<String> deck = createDeckWithoutCards(removeFromDeck);
+        public SimulationResult simulateAdaptive(String heroHand, List<String> villainHands) {
+            // Use parallel processing with number of CPU cores
+            int numThreads = Runtime.getRuntime().availableProcessors();
+            
+            if (numThreads <= 1) {
+                return simulateAdaptiveSingleThread(heroHand, villainHands);
+            }
+            
+            return simulateAdaptiveParallel(heroHand, villainHands, numThreads);
+        }
         
-        int heroWins = 0;
-        int iterations = 0;
+        private List<String> validateAndCreateDeck(String heroHand, List<String> villainHands) {
+            // Validate input cards and build removeFromDeck set
+            Set<String> removeFromDeck = new HashSet<>();
+            validateAndCollectCards(heroHand, "Hero", removeFromDeck);
+            
+            if (villainHands != null && !villainHands.isEmpty()) {
+                for (int i = 0; i < villainHands.size(); i++) {
+                    validateAndCollectCards(villainHands.get(i), "Villain " + (i + 1), removeFromDeck);
+                }
+            }
+            
+            // Create deck without hero and villain cards
+            return createDeckWithoutCards(removeFromDeck);
+        }
         
-        while (true) {
+        private SimulationResult simulateAdaptiveSingleThread(String heroHand, List<String> villainHands) {
+            List<String> deck = validateAndCreateDeck(heroHand, villainHands);
+            
+            int heroWins = 0;
+            int iterations = 0;
+            
+            while (true) {
+                // Run a batch of simulations
+                SimulationBatchResult batch = runSimulationBatch(heroHand, villainHands, deck);
+                heroWins += batch.heroWins;
+                iterations += batch.iterations;
+                
+                // Check stopping criteria only at meaningful checkpoints
+                if (shouldCheckStoppingCriteria(iterations)) {
+                    double winRate = (double) heroWins / iterations;
+                    double standardDeviation = calculateStandardDeviation(winRate, iterations);
+                    double confidenceInterval = calculateConfidenceInterval95(standardDeviation);
+
+                    if (iterations >= MIN_ITERATIONS && standardDeviation <= DEFAULT_STOPPING_SD && confidenceInterval <= DEFAULT_STOPPING_CI) {
+                        break;
+                    }
+                }
+            }
+            
+            double finalWinRate = (double) heroWins / iterations;
+            double finalStandardDeviation = calculateStandardDeviation(finalWinRate, iterations);
+            double finalConfidenceInterval = calculateConfidenceInterval95(finalStandardDeviation);
+            
+            return new SimulationResult(finalWinRate, finalStandardDeviation, finalConfidenceInterval, iterations);
+        }
+        
+        private static class SimulationBatchResult {
+            final int heroWins;
+            final int iterations;
+            
+            SimulationBatchResult(int heroWins, int iterations) {
+                this.heroWins = heroWins;
+                this.iterations = iterations;
+            }
+        }
+        
+        private SimulationBatchResult runSimulationBatch(String heroHand, List<String> villainHands, List<String> deck) {
+            int heroWins = 0;
+            int iterations = 0;
+            
+            // Run a batch of simulations
+            for (int i = 0; i < SIMULATION_BATCH_SIZE; i++) {
             iterations++;
-            List<String> iterationDeck = new ArrayList<>(deck); // fresh deck for this iteration
+            List<String> iterationDeck = new ArrayList<>(deck);
             Collections.shuffle(iterationDeck);
             int currentDeckIndex = 0;
 
             // Deal villain hands if none specified
             List<String> currentVillainHands = new ArrayList<>();
             if (villainHands == null || villainHands.isEmpty()) {
-                // Deal first 4 cards for villain (like a real dealer)
                 String villainHand = dealSequentialHand(iterationDeck, currentDeckIndex, 4);
                 currentVillainHands.add(villainHand);
                 currentDeckIndex += 4;
             } else {
-                // Use specified villain hands
                 currentVillainHands.addAll(villainHands);
             }
 
-            // Deal community cards (next 5 cards after villain cards)
             String communityCards = dealSequentialHand(iterationDeck, currentDeckIndex, 5);
 
-            // Evaluate hands - hero must beat ALL villains
             int heroRank = evaluatePLOHand(heroHand, communityCards);
             boolean heroWinsThis = true;
             
             for (String villainHand : currentVillainHands) {
                 int villainRank = evaluatePLOHand(villainHand, communityCards);
-                if (villainRank <= heroRank) { // villain wins or ties
+                if (villainRank <= heroRank) {
                     heroWinsThis = false;
                     break;
                 }
@@ -110,121 +151,59 @@ public class PLOSimulationEngine {
             if (heroWinsThis) {
                 heroWins++;
             }
-
-            // Check stopping criteria at checkpoints
-            if (shouldCheckStoppingCriteria(iterations)) {
-                double winRate = (double) heroWins / iterations;
-                double standardDeviation = calculateStandardDeviation(winRate, iterations);
-                double confidenceInterval = calculateConfidenceInterval95(standardDeviation);
-
-                if (iterations >= MIN_ITERATIONS && standardDeviation <= DEFAULT_STOPPING_SD && confidenceInterval <= DEFAULT_STOPPING_CI) {
-                    break;
-                }
-            }
         }
         
-        double finalWinRate = (double) heroWins / iterations;
-        double finalStandardDeviation = calculateStandardDeviation(finalWinRate, iterations);
-        double finalConfidenceInterval = calculateConfidenceInterval95(finalStandardDeviation);
-        
-        return new SimulationResult(finalWinRate, finalStandardDeviation, finalConfidenceInterval, iterations);
+        return new SimulationBatchResult(heroWins, iterations);
     }
     
     private SimulationResult simulateAdaptiveParallel(String heroHand, List<String> villainHands, int numThreads) {
-        // Validate input cards and build removeFromDeck set
-        Set<String> removeFromDeck = new HashSet<>();
-        validateAndCollectCards(heroHand, "Hero", removeFromDeck);
+        List<String> deck = validateAndCreateDeck(heroHand, villainHands);
         
-        if (villainHands != null && !villainHands.isEmpty()) {
-            for (int i = 0; i < villainHands.size(); i++) {
-                validateAndCollectCards(villainHands.get(i), "Villain " + (i + 1), removeFromDeck);
-            }
-        }
-        
-        // Create deck without hero and villain cards
-        List<String> deck = createDeckWithoutCards(removeFromDeck);
-        
-        // Shared counters for parallel processing
-        final int[] heroWins = {0};
+        // Shared state for coordination
+        final int[] totalHeroWins = {0};
         final int[] totalIterations = {0};
         final Object lock = new Object();
+        final boolean[] shouldStop = {false};
         
-        // Create and start worker threads
-        Thread[] threads = new Thread[numThreads];
+        // Create CompletableFuture tasks
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        
         for (int t = 0; t < numThreads; t++) {
-            final int threadId = t;
-            threads[t] = new Thread(() -> {
+            CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                 List<String> threadDeck = new ArrayList<>(deck);
-                int threadHeroWins = 0;
-                int threadIterations = 0;
                 
-                while (true) {
-                    threadIterations++;
-                    List<String> iterationDeck = new ArrayList<>(threadDeck);
-                    Collections.shuffle(iterationDeck);
-                    int currentDeckIndex = 0;
-
-                    // Deal villain hands if none specified
-                    List<String> currentVillainHands = new ArrayList<>();
-                    if (villainHands == null || villainHands.isEmpty()) {
-                        String villainHand = dealSequentialHand(iterationDeck, currentDeckIndex, 4);
-                        currentVillainHands.add(villainHand);
-                        currentDeckIndex += 4;
-                    } else {
-                        currentVillainHands.addAll(villainHands);
-                    }
-
-                    String communityCards = dealSequentialHand(iterationDeck, currentDeckIndex, 5);
-
-                    int heroRank = evaluatePLOHand(heroHand, communityCards);
-                    boolean heroWinsThis = true;
+                while (!shouldStop[0]) {
+                    // Run a batch of simulations using the shared method
+                    SimulationBatchResult batch = runSimulationBatch(heroHand, villainHands, threadDeck);
                     
-                    for (String villainHand : currentVillainHands) {
-                        int villainRank = evaluatePLOHand(villainHand, communityCards);
-                        if (villainRank <= heroRank) {
-                            heroWinsThis = false;
-                            break;
-                        }
-                    }
-                    
-                    if (heroWinsThis) {
-                        threadHeroWins++;
-                    }
-
-                    // Check stopping criteria at checkpoints
-                    if (shouldCheckStoppingCriteria(threadIterations)) {
-                        synchronized (lock) {
-                            int totalWins = heroWins[0] + threadHeroWins;
-                            int totalIters = totalIterations[0] + threadIterations;
+                    // Update global counters
+                    synchronized (lock) {
+                        if (!shouldStop[0]) {
+                            totalHeroWins[0] += batch.heroWins;
+                            totalIterations[0] += batch.iterations;
                             
-                            double winRate = (double) totalWins / totalIters;
-                            double standardDeviation = calculateStandardDeviation(winRate, totalIters);
-                            double confidenceInterval = calculateConfidenceInterval95(standardDeviation);
+                            // Check stopping criteria only at meaningful checkpoints
+                            if (shouldCheckStoppingCriteria(totalIterations[0])) {
+                                double winRate = (double) totalHeroWins[0] / totalIterations[0];
+                                double standardDeviation = calculateStandardDeviation(winRate, totalIterations[0]);
+                                double confidenceInterval = calculateConfidenceInterval95(standardDeviation);
 
-                            if (totalIters >= MIN_ITERATIONS && standardDeviation <= DEFAULT_STOPPING_SD && confidenceInterval <= DEFAULT_STOPPING_CI) {
-                                // Update global counters and break
-                                heroWins[0] = totalWins;
-                                totalIterations[0] = totalIters;
-                                return;
+                                if (totalIterations[0] >= MIN_ITERATIONS && standardDeviation <= DEFAULT_STOPPING_SD && confidenceInterval <= DEFAULT_STOPPING_CI) {
+                                    shouldStop[0] = true;
+                                }
                             }
                         }
                     }
                 }
             });
-            threads[t].start();
+            futures.add(future);
         }
         
-        // Wait for all threads to complete
-        for (Thread thread : threads) {
-            try {
-                thread.join();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Simulation interrupted", e);
-            }
-        }
+        // Wait for all futures to complete
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
         
-        double finalWinRate = (double) heroWins[0] / totalIterations[0];
+        // Calculate final results
+        double finalWinRate = (double) totalHeroWins[0] / totalIterations[0];
         double finalStandardDeviation = calculateStandardDeviation(finalWinRate, totalIterations[0]);
         double finalConfidenceInterval = calculateConfidenceInterval95(finalStandardDeviation);
         
@@ -354,7 +333,7 @@ public class PLOSimulationEngine {
         System.out.println("Running simulation with " + numThreads + " threads...");
         
         long startTime = System.currentTimeMillis();
-        SimulationResult result = engine.simulateAdaptive(heroHand, villainHands, numThreads);
+        SimulationResult result = engine.simulateAdaptive(heroHand, villainHands);
         long endTime = System.currentTimeMillis();
         
         System.out.printf("Win Rate: %.4f%% (SD: %.4f%%, CI: %.4f%%, Iterations: %d)%n", 
