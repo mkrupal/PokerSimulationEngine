@@ -7,62 +7,46 @@ import java.util.*;
 
 public class PokerHandGenerator {
     
-    private final HandNormalizer normalizer = new HandNormalizer();
     private final String[] ranks = {"2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"};
     private final String[] suits = {"s", "h", "d", "c"};
     
     public static void main(String[] args) {
         PokerHandGenerator generator = new PokerHandGenerator();
-        generator.generateAllHands("normalized_ranked_poker_hands.txt");
+        generator.generateAllHands("non_normalized_ranked_poker_hands.txt");
     }
     
     public void generateAllHands(String filename) {
         System.out.println("Generating all possible 5-card poker hands...");
         
         try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
-            writer.println("normalized_hand,hand_rank,hand_type");
+            writer.println("hand,hand_rank,hand_type");
             
             // Generate all possible 5-card combinations
             List<String[]> allHands = generateAllCombinations();
             System.out.println("Generated " + allHands.size() + " hands");
             
-            // Track seen normalized hands to avoid duplicates
-            Set<String> seenNormalizedHands = new HashSet<>();
+            // Sort all hands by strength (highest first)
+            allHands.sort((a, b) -> compareHands(b, a));
             
-            // Process each hand
-            int rank = 1;
+            // Assign ranks based on equivalence
+            int currentRank = 0;
+            String lastEquivalent = null;
             
-            // Royal Flush (A-K-Q-J-T of same suit)
-            rank = processHandType(writer, allHands, rank, "Royal Flush", this::isRoyalFlush, seenNormalizedHands);
+            for (String[] hand : allHands) {
+                String handStr = sortAndFormatHand(hand);
+                String handType = getHandType(hand);
+                String equivalent = getEquivalentKey(hand, handType);
+                
+                // If this is a new equivalent hand, increment rank
+                if (!equivalent.equals(lastEquivalent)) {
+                    currentRank++;
+                    lastEquivalent = equivalent;
+                }
+                
+                writer.println(handStr + "," + currentRank + "," + handType);
+            }
             
-            // Straight Flush (5 consecutive cards of same suit)
-            rank = processHandType(writer, allHands, rank, "Straight Flush", this::isStraightFlush, seenNormalizedHands);
-            
-            // Four of a Kind
-            rank = processHandType(writer, allHands, rank, "Four of a Kind", this::isFourOfAKind, seenNormalizedHands);
-            
-            // Full House
-            rank = processHandType(writer, allHands, rank, "Full House", this::isFullHouse, seenNormalizedHands);
-            
-            // Flush
-            rank = processHandType(writer, allHands, rank, "Flush", this::isFlush, seenNormalizedHands);
-            
-            // Straight
-            rank = processHandType(writer, allHands, rank, "Straight", this::isStraight, seenNormalizedHands);
-            
-            // Three of a Kind
-            rank = processHandType(writer, allHands, rank, "Three of a Kind", this::isThreeOfAKind, seenNormalizedHands);
-            
-            // Two Pair
-            rank = processHandType(writer, allHands, rank, "Two Pair", this::isTwoPair, seenNormalizedHands);
-            
-            // One Pair
-            rank = processHandType(writer, allHands, rank, "One Pair", this::isOnePair, seenNormalizedHands);
-            
-            // High Card
-            rank = processHandType(writer, allHands, rank, "High Card", this::isHighCard, seenNormalizedHands);
-            
-            System.out.println("Generated " + (rank - 1) + " unique normalized hands");
+            System.out.println("Generated " + allHands.size() + " hands with " + currentRank + " unique ranks");
             System.out.println("Results written to " + filename);
             
         } catch (IOException e) {
@@ -70,36 +54,140 @@ public class PokerHandGenerator {
         }
     }
     
-    private int processHandType(PrintWriter writer, List<String[]> allHands, int startRank, 
-                              String handType, HandEvaluator evaluator, Set<String> seenNormalizedHands) {
-        int currentRank = startRank;
-        List<String[]> handsOfType = new ArrayList<>();
-        
-        for (String[] hand : allHands) {
-            if (evaluator.evaluate(hand)) {
-                handsOfType.add(hand);
+    private String sortAndFormatHand(String[] hand) {
+        // Sort by rank (high to low), then by suit (s > h > d > c)
+        String[] sorted = hand.clone();
+        Arrays.sort(sorted, (a, b) -> {
+            int rankA = getRankValue(a.charAt(0));
+            int rankB = getRankValue(b.charAt(0));
+            if (rankA != rankB) {
+                return Integer.compare(rankB, rankA); // High to low
             }
+            return suitOrder(b.charAt(1)) - suitOrder(a.charAt(1)); // s > h > d > c
+        });
+        StringBuilder sb = new StringBuilder();
+        for (String card : sorted) {
+            sb.append(card);
         }
-        
-        // Sort hands of this type by strength (highest first)
-        handsOfType.sort((a, b) -> compareHands(b, a)); // Reverse order for highest first
-        
-        // Normalize and write each hand
-        for (String[] hand : handsOfType) {
-            HandNormalizer.NormalizationResult result = normalizer.normalizeHand(hand);
-            String normalizedHand = arrayToString(result.normalizedCards);
-            
-            // Only write if we haven't seen this normalized hand before
-            if (!seenNormalizedHands.contains(normalizedHand)) {
-                writer.println(normalizedHand + "," + currentRank + "," + handType);
-                seenNormalizedHands.add(normalizedHand);
-                currentRank++;
+        return sb.toString();
+    }
+    
+    private String getEquivalentKey(String[] hand, String handType) {
+        // For straights and flushes, use rank sequence only
+        if (handType.equals("Straight") || handType.equals("Straight Flush") || handType.equals("Royal Flush")) {
+            String[] sortedByRank = sortByRank(hand);
+            StringBuilder key = new StringBuilder();
+            for (String card : sortedByRank) {
+                key.append(card.charAt(0));
             }
+            return handType + ":" + key.toString();
+        } else if (handType.equals("Flush")) {
+            String[] sortedByRank = sortByRank(hand);
+            StringBuilder key = new StringBuilder();
+            for (String card : sortedByRank) {
+                key.append(card.charAt(0));
+            }
+            return handType + ":" + key.toString();
+        } else if (handType.equals("Four of a Kind")) {
+            // For four of a kind: rank of the four cards + rank of kicker
+            Map<Character, Integer> rankCounts = getRankCounts(hand);
+            char fourRank = 0;
+            char kickerRank = 0;
+            for (Map.Entry<Character, Integer> entry : rankCounts.entrySet()) {
+                if (entry.getValue() == 4) {
+                    fourRank = entry.getKey();
+                } else {
+                    kickerRank = entry.getKey();
+                }
+            }
+            return handType + ":" + fourRank + kickerRank;
+        } else if (handType.equals("Full House")) {
+            // For full house: rank of three + rank of pair
+            Map<Character, Integer> rankCounts = getRankCounts(hand);
+            char threeRank = 0;
+            char pairRank = 0;
+            for (Map.Entry<Character, Integer> entry : rankCounts.entrySet()) {
+                if (entry.getValue() == 3) {
+                    threeRank = entry.getKey();
+                } else {
+                    pairRank = entry.getKey();
+                }
+            }
+            return handType + ":" + threeRank + pairRank;
+        } else if (handType.equals("Three of a Kind")) {
+            // For three of a kind: rank of three + ranks of kickers (sorted)
+            Map<Character, Integer> rankCounts = getRankCounts(hand);
+            char threeRank = 0;
+            List<Character> kickers = new ArrayList<>();
+            for (Map.Entry<Character, Integer> entry : rankCounts.entrySet()) {
+                if (entry.getValue() == 3) {
+                    threeRank = entry.getKey();
+                } else {
+                    kickers.add(entry.getKey());
+                }
+            }
+            kickers.sort((a, b) -> Integer.compare(getRankValue(b), getRankValue(a))); // High to low
+            return handType + ":" + threeRank + kickers.get(0) + kickers.get(1);
+        } else if (handType.equals("Two Pair")) {
+            // For two pair: ranks of pairs (high to low) + kicker
+            Map<Character, Integer> rankCounts = getRankCounts(hand);
+            List<Character> pairs = new ArrayList<>();
+            char kicker = 0;
+            for (Map.Entry<Character, Integer> entry : rankCounts.entrySet()) {
+                if (entry.getValue() == 2) {
+                    pairs.add(entry.getKey());
+                } else {
+                    kicker = entry.getKey();
+                }
+            }
+            pairs.sort((a, b) -> Integer.compare(getRankValue(b), getRankValue(a))); // High to low
+            return handType + ":" + pairs.get(0) + pairs.get(1) + kicker;
+        } else if (handType.equals("One Pair")) {
+            // For one pair: rank of pair + ranks of kickers (sorted)
+            Map<Character, Integer> rankCounts = getRankCounts(hand);
+            char pairRank = 0;
+            List<Character> kickers = new ArrayList<>();
+            for (Map.Entry<Character, Integer> entry : rankCounts.entrySet()) {
+                if (entry.getValue() == 2) {
+                    pairRank = entry.getKey();
+                } else {
+                    kickers.add(entry.getKey());
+                }
+            }
+            kickers.sort((a, b) -> Integer.compare(getRankValue(b), getRankValue(a))); // High to low
+            return handType + ":" + pairRank + kickers.get(0) + kickers.get(1) + kickers.get(2);
+        } else {
+            // For high card: all ranks sorted
+            String[] sortedByRank = sortByRank(hand);
+            StringBuilder key = new StringBuilder();
+            for (String card : sortedByRank) {
+                key.append(card.charAt(0));
+            }
+            return handType + ":" + key.toString();
         }
-        
-        System.out.println(handType + ": " + handsOfType.size() + " hands, " + 
-                          (currentRank - startRank) + " unique normalized");
-        return currentRank;
+    }
+    
+    private String[] sortByRank(String[] hand) {
+        String[] sorted = hand.clone();
+        Arrays.sort(sorted, (a, b) -> {
+            int rankA = getRankValue(a.charAt(0));
+            int rankB = getRankValue(b.charAt(0));
+            if (rankA != rankB) {
+                return Integer.compare(rankB, rankA); // High to low
+            }
+            return suitOrder(b.charAt(1)) - suitOrder(a.charAt(1)); // s > h > d > c
+        });
+        return sorted;
+    }
+    
+    private int suitOrder(char suit) {
+        switch (suit) {
+            case 's': return 3; // spades highest
+            case 'h': return 2; // hearts
+            case 'd': return 1; // diamonds
+            case 'c': return 0; // clubs lowest
+            default: return -1;
+        }
     }
     
     private List<String[]> generateAllCombinations() {
@@ -131,14 +219,6 @@ public class PokerHandGenerator {
         }
     }
     
-    private String arrayToString(String[] cards) {
-        StringBuilder sb = new StringBuilder();
-        for (String card : cards) {
-            sb.append(card);
-        }
-        return sb.toString();
-    }
-    
     private int compareHands(String[] hand1, String[] hand2) {
         // Compare by hand type first, then by card values
         int type1 = getHandTypeValue(hand1);
@@ -165,6 +245,19 @@ public class PokerHandGenerator {
         return 0; // High Card
     }
     
+    private String getHandType(String[] hand) {
+        if (isRoyalFlush(hand)) return "Royal Flush";
+        if (isStraightFlush(hand)) return "Straight Flush";
+        if (isFourOfAKind(hand)) return "Four of a Kind";
+        if (isFullHouse(hand)) return "Full House";
+        if (isFlush(hand)) return "Flush";
+        if (isStraight(hand)) return "Straight";
+        if (isThreeOfAKind(hand)) return "Three of a Kind";
+        if (isTwoPair(hand)) return "Two Pair";
+        if (isOnePair(hand)) return "One Pair";
+        return "High Card";
+    }
+    
     private int compareCardValues(String[] hand1, String[] hand2) {
         // Sort both hands by rank (high to low)
         String[] sorted1 = sortByRank(hand1);
@@ -178,16 +271,6 @@ public class PokerHandGenerator {
             }
         }
         return 0; // Equal
-    }
-    
-    private String[] sortByRank(String[] hand) {
-        String[] sorted = hand.clone();
-        Arrays.sort(sorted, (a, b) -> {
-            int rankA = getRankValue(a.charAt(0));
-            int rankB = getRankValue(b.charAt(0));
-            return Integer.compare(rankB, rankA); // High to low
-        });
-        return sorted;
     }
     
     private int getRankValue(char rank) {
@@ -262,12 +345,6 @@ public class PokerHandGenerator {
         return rankCounts.values().stream().anyMatch(count -> count == 2);
     }
     
-    private boolean isHighCard(String[] hand) {
-        return !isOnePair(hand) && !isTwoPair(hand) && !isThreeOfAKind(hand) && 
-               !isStraight(hand) && !isFlush(hand) && !isFullHouse(hand) && 
-               !isFourOfAKind(hand) && !isStraightFlush(hand) && !isRoyalFlush(hand);
-    }
-    
     private Map<Character, Integer> getRankCounts(String[] hand) {
         Map<Character, Integer> counts = new HashMap<>();
         for (String card : hand) {
@@ -283,10 +360,5 @@ public class PokerHandGenerator {
     
     private boolean hasKing(String[] hand) {
         return Arrays.stream(hand).anyMatch(card -> card.charAt(0) == 'K');
-    }
-    
-    @FunctionalInterface
-    private interface HandEvaluator {
-        boolean evaluate(String[] hand);
     }
 } 

@@ -1,6 +1,9 @@
 package com.plo.simulator;
 
 import org.junit.jupiter.api.Test;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 public class PLOSimulationTest {
     
@@ -8,7 +11,7 @@ public class PLOSimulationTest {
     public void testPLOSimulation() {
         System.out.println("=== PLO Monte Carlo Simulation Test (Success Cases) ===");
         
-        PLOSimulationEngine engine = new PLOSimulationEngine("normalized_ranked_poker_hands.txt");
+        PLOSimulationEngine engine = new PLOSimulationEngine();
         
         // Only valid test cases (no card conflicts)
         String[][] testData = {
@@ -18,25 +21,25 @@ public class PLOSimulationTest {
         for (int i = 0; i < testData.length; i++) {
             String[] testCase = testData[i];
             String heroHand = testCase[0];
-            String[] villainHands;
+            List<String> villainHands;
             String description;
             
             if (testCase.length == 2) {
                 // Only hero hand provided - will generate random villains
-                villainHands = new String[0];
+                villainHands = new ArrayList<>();
                 description = testCase[1];
             } else {
-                villainHands = new String[testCase.length - 2]; // Last element is description
+                villainHands = new ArrayList<>();
                 for (int j = 1; j < testCase.length - 1; j++) {
-                    villainHands[j - 1] = testCase[j];
+                    villainHands.add(testCase[j]);
                 }
                 description = testCase[testCase.length - 1];
             }
             
             System.out.println("\n--- Test Case " + (i + 1) + ": " + description + " ---");
             System.out.println("Hero: " + heroHand);
-            for (int v = 0; v < villainHands.length; v++) {
-                System.out.println("Villain " + (v + 1) + ": " + villainHands[v]);
+            for (int v = 0; v < villainHands.size(); v++) {
+                System.out.println("Villain " + (v + 1) + ": " + villainHands.get(v));
             }
             
             PLOSimulationEngine.SimulationResult result = engine.simulateAdaptive(heroHand, villainHands);
@@ -50,7 +53,7 @@ public class PLOSimulationTest {
     public void testPLOSimulationFailures() {
         System.out.println("=== PLO Monte Carlo Simulation Test (Failure Cases) ===");
         
-        PLOSimulationEngine engine = new PLOSimulationEngine("normalized_ranked_poker_hands.txt");
+        PLOSimulationEngine engine = new PLOSimulationEngine();
         
         // Only failure test cases (card conflicts, invalid input, etc.)
         String[][] failureData = {
@@ -61,16 +64,16 @@ public class PLOSimulationTest {
         for (int i = 0; i < failureData.length; i++) {
             String[] testCase = failureData[i];
             String heroHand = testCase[0];
-            String[] villainHands = new String[testCase.length - 2];
+            List<String> villainHands = new ArrayList<>();
             for (int j = 1; j < testCase.length - 1; j++) {
-                villainHands[j - 1] = testCase[j];
+                villainHands.add(testCase[j]);
             }
             String description = testCase[testCase.length - 1];
             
             System.out.println("\n--- Failure Test Case " + (i + 1) + ": " + description + " ---");
             System.out.println("Hero: " + heroHand);
-            for (int v = 0; v < villainHands.length; v++) {
-                System.out.println("Villain " + (v + 1) + ": " + villainHands[v]);
+            for (int v = 0; v < villainHands.size(); v++) {
+                System.out.println("Villain " + (v + 1) + ": " + villainHands.get(v));
             }
             try {
                 engine.simulateAdaptive(heroHand, villainHands);
@@ -85,14 +88,14 @@ public class PLOSimulationTest {
     public void testMultipleVillains() {
         System.out.println("=== Multiple Villains Test ===");
         
-        PLOSimulationEngine engine = new PLOSimulationEngine("normalized_ranked_poker_hands.txt");
+        PLOSimulationEngine engine = new PLOSimulationEngine();
         
         String heroHand = "KsKhQdQc";
-        String[] villainHands = {"AsAdAhAc", "2s2h2d2c"}; // Non-conflicting hands
+        List<String> villainHands = Arrays.asList("AsAdAhAc", "2s2h2d2c"); // Non-conflicting hands
         
         System.out.println("Testing: Hero " + heroHand + " vs 2 Villains");
-        for (int i = 0; i < villainHands.length; i++) {
-            System.out.println("Villain " + (i + 1) + ": " + villainHands[i]);
+        for (int i = 0; i < villainHands.size(); i++) {
+            System.out.println("Villain " + (i + 1) + ": " + villainHands.get(i));
         }
         
         PLOSimulationEngine.SimulationResult result = engine.simulateAdaptive(heroHand, villainHands);

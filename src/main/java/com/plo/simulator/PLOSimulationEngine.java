@@ -3,42 +3,32 @@ package com.plo.simulator;
 import java.util.*;
 
 public class PLOSimulationEngine {
-    private final PokerHandCache handCache;
-    private final String[] ranks = {"2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"};
-    private final String[] suits = {"s", "h", "d", "c"};
     
-    public PLOSimulationEngine(String handCacheFile) {
-        this.handCache = new PokerHandCache(handCacheFile);
+    private final PokerHandCache handCache;
+    private final Set<String> fullDeck;
+    
+    // Statistical constants
+    private static final double CONFIDENCE_LEVEL_95 = 1.96;
+    private static final double DEFAULT_STOPPING_SD = 0.005; // 0.5% standard deviation threshold
+    private static final double DEFAULT_STOPPING_CI = 0.01; // 1% confidence interval threshold
+    private static final int MIN_ITERATIONS = 100; // Minimum iterations before allowing early stopping
+    
+    public PLOSimulationEngine() {
+        this.handCache = new PokerHandCache();
+        this.fullDeck = initializeFullDeck();
     }
     
-    public static void main(String[] args) {
-        args = new String[] {"AsAd6h6s"};
-        if (args.length < 1) {
-            System.out.println("Usage: java PLOSimulationEngine <hero_hand> [villain_hand1] [villain_hand2] ...");
-            System.out.println("Example: java PLOSimulationEngine Ks9h8h7s");
-            System.out.println("Example: java PLOSimulationEngine Ks9h8h7s AsAdAhAc");
-            return;
-        }
+    private Set<String> initializeFullDeck() {
+        Set<String> deck = new HashSet<>();
+        String[] ranks = {"2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"};
+        String[] suits = {"c", "d", "h", "s"};
         
-        PLOSimulationEngine engine = new PLOSimulationEngine("normalized_ranked_poker_hands.txt");
-        
-        String heroHand = args[0];
-        String[] villainHands;
-        
-        if (args.length == 1) {
-            // No villain hands specified, generate 5 random villain hands
-            villainHands = new String[0]; // Will be handled in simulate method
-        } else {
-            villainHands = new String[args.length - 1];
-            for (int i = 1; i < args.length; i++) {
-                villainHands[i - 1] = args[i];
+        for (String suit : suits) {
+            for (String rank : ranks) {
+                deck.add(rank + suit);
             }
         }
-        
-        SimulationResult result = engine.simulateAdaptive(heroHand, villainHands);
-        System.out.printf("Final Result: %.4f%% (SD: %.4f%%, CI: %.4f%%, Simulations: %d)%n", 
-                         result.winRate * 100, result.standardDeviation * 100, 
-                         result.confidenceInterval * 100, result.iterations);
+        return deck;
     }
     
     public static class SimulationResult {
@@ -55,72 +45,282 @@ public class PLOSimulationEngine {
         }
     }
     
-    public SimulationResult simulateAdaptive(String heroHand, String[] villainHands) {
-        System.out.println("Running adaptive PLO simulation...");
-        System.out.println("Hero: " + heroHand);
-        
-        // Validate card conflicts
-        if (!validateNoCardConflicts(heroHand, villainHands)) {
-            throw new IllegalArgumentException("Card conflict detected! Players cannot share cards.");
+    public SimulationResult simulateAdaptive(String heroHand, List<String> villainHands) {
+        return simulateAdaptive(heroHand, villainHands, 1);
+    }
+    
+    public SimulationResult simulateAdaptive(String heroHand, List<String> villainHands, int numThreads) {
+        if (numThreads <= 1) {
+            return simulateAdaptiveSingleThread(heroHand, villainHands);
         }
         
-        // If no villain hands provided, we'll generate them dynamically for each simulation
-        boolean generateRandomVillains = villainHands.length == 0;
-        if (generateRandomVillains) {
-            System.out.println("No villain hands specified. Will generate 1 random villain hand for each simulation.");
+        return simulateAdaptiveParallel(heroHand, villainHands, numThreads);
+    }
+    
+    private SimulationResult simulateAdaptiveSingleThread(String heroHand, List<String> villainHands) {
+        // Validate input cards and build removeFromDeck set
+        Set<String> removeFromDeck = new HashSet<>();
+        validateAndCollectCards(heroHand, "Hero", removeFromDeck);
+        
+        if (villainHands != null && !villainHands.isEmpty()) {
+            for (int i = 0; i < villainHands.size(); i++) {
+                validateAndCollectCards(villainHands.get(i), "Villain " + (i + 1), removeFromDeck);
+            }
         }
         
-        for (int i = 0; i < villainHands.length; i++) {
-            System.out.println("Villain " + (i + 1) + ": " + villainHands[i]);
-        }
+        // Create deck without hero and villain cards
+        List<String> deck = createDeckWithoutCards(removeFromDeck);
         
         int heroWins = 0;
         int iterations = 0;
-        final int MAX_ITERATIONS = 1_000_000;
         
-        while (iterations < MAX_ITERATIONS) {
+        while (true) {
             iterations++;
+            List<String> iterationDeck = new ArrayList<>(deck); // fresh deck for this iteration
+            Collections.shuffle(iterationDeck);
+            int currentDeckIndex = 0;
+
+            // Deal villain hands if none specified
+            List<String> currentVillainHands = new ArrayList<>();
+            if (villainHands == null || villainHands.isEmpty()) {
+                // Deal first 4 cards for villain (like a real dealer)
+                String villainHand = dealSequentialHand(iterationDeck, currentDeckIndex, 4);
+                currentVillainHands.add(villainHand);
+                currentDeckIndex += 4;
+            } else {
+                // Use specified villain hands
+                currentVillainHands.addAll(villainHands);
+            }
+
+            // Deal community cards (next 5 cards after villain cards)
+            String communityCards = dealSequentialHand(iterationDeck, currentDeckIndex, 5);
+
+            // Evaluate hands - hero must beat ALL villains
+            int heroRank = evaluatePLOHand(heroHand, communityCards);
+            boolean heroWinsThis = true;
             
-            // Generate new random villain hands for each simulation if needed
-            String[] currentVillainHands = villainHands;
-            if (generateRandomVillains) {
-                currentVillainHands = generateRandomVillainHands(heroHand, 1);
+            for (String villainHand : currentVillainHands) {
+                int villainRank = evaluatePLOHand(villainHand, communityCards);
+                if (villainRank <= heroRank) { // villain wins or ties
+                    heroWinsThis = false;
+                    break;
+                }
             }
             
-            if (simulateOneHand(heroHand, currentVillainHands)) {
+            if (heroWinsThis) {
                 heroWins++;
             }
-            
-            // Check if we should log progress (logarithmic intervals)
-            boolean shouldLog = shouldLogIteration(iterations);
-            
-            if (shouldLog) {
+
+            // Check stopping criteria at checkpoints
+            if (shouldCheckStoppingCriteria(iterations)) {
                 double winRate = (double) heroWins / iterations;
                 double standardDeviation = calculateStandardDeviation(winRate, iterations);
-                double confidenceInterval = calculateConfidenceInterval(standardDeviation, iterations);
-                
-                System.out.printf("Iteration %d: Win Rate: %.4f%%, SD: %.4f%%, CI: %.4f%%%n", 
-                                iterations, winRate * 100, standardDeviation * 100, confidenceInterval * 100);
-                
-                // Check stopping criteria
-                if (standardDeviation < 0.01 && confidenceInterval < 0.02) {
-                    System.out.println("Stopping criteria met!");
+                double confidenceInterval = calculateConfidenceInterval95(standardDeviation);
+
+                if (iterations >= MIN_ITERATIONS && standardDeviation <= DEFAULT_STOPPING_SD && confidenceInterval <= DEFAULT_STOPPING_CI) {
                     break;
                 }
             }
         }
         
-        // Calculate final statistics
         double finalWinRate = (double) heroWins / iterations;
         double finalStandardDeviation = calculateStandardDeviation(finalWinRate, iterations);
-        double finalConfidenceInterval = calculateConfidenceInterval(finalStandardDeviation, iterations);
-        
-        System.out.println("Hero wins: " + heroWins + "/" + iterations);
+        double finalConfidenceInterval = calculateConfidenceInterval95(finalStandardDeviation);
         
         return new SimulationResult(finalWinRate, finalStandardDeviation, finalConfidenceInterval, iterations);
     }
     
-    private boolean shouldLogIteration(int iteration) {
+    private SimulationResult simulateAdaptiveParallel(String heroHand, List<String> villainHands, int numThreads) {
+        // Validate input cards and build removeFromDeck set
+        Set<String> removeFromDeck = new HashSet<>();
+        validateAndCollectCards(heroHand, "Hero", removeFromDeck);
+        
+        if (villainHands != null && !villainHands.isEmpty()) {
+            for (int i = 0; i < villainHands.size(); i++) {
+                validateAndCollectCards(villainHands.get(i), "Villain " + (i + 1), removeFromDeck);
+            }
+        }
+        
+        // Create deck without hero and villain cards
+        List<String> deck = createDeckWithoutCards(removeFromDeck);
+        
+        // Shared counters for parallel processing
+        final int[] heroWins = {0};
+        final int[] totalIterations = {0};
+        final Object lock = new Object();
+        
+        // Create and start worker threads
+        Thread[] threads = new Thread[numThreads];
+        for (int t = 0; t < numThreads; t++) {
+            final int threadId = t;
+            threads[t] = new Thread(() -> {
+                List<String> threadDeck = new ArrayList<>(deck);
+                int threadHeroWins = 0;
+                int threadIterations = 0;
+                
+                while (true) {
+                    threadIterations++;
+                    List<String> iterationDeck = new ArrayList<>(threadDeck);
+                    Collections.shuffle(iterationDeck);
+                    int currentDeckIndex = 0;
+
+                    // Deal villain hands if none specified
+                    List<String> currentVillainHands = new ArrayList<>();
+                    if (villainHands == null || villainHands.isEmpty()) {
+                        String villainHand = dealSequentialHand(iterationDeck, currentDeckIndex, 4);
+                        currentVillainHands.add(villainHand);
+                        currentDeckIndex += 4;
+                    } else {
+                        currentVillainHands.addAll(villainHands);
+                    }
+
+                    String communityCards = dealSequentialHand(iterationDeck, currentDeckIndex, 5);
+
+                    int heroRank = evaluatePLOHand(heroHand, communityCards);
+                    boolean heroWinsThis = true;
+                    
+                    for (String villainHand : currentVillainHands) {
+                        int villainRank = evaluatePLOHand(villainHand, communityCards);
+                        if (villainRank <= heroRank) {
+                            heroWinsThis = false;
+                            break;
+                        }
+                    }
+                    
+                    if (heroWinsThis) {
+                        threadHeroWins++;
+                    }
+
+                    // Check stopping criteria at checkpoints
+                    if (shouldCheckStoppingCriteria(threadIterations)) {
+                        synchronized (lock) {
+                            int totalWins = heroWins[0] + threadHeroWins;
+                            int totalIters = totalIterations[0] + threadIterations;
+                            
+                            double winRate = (double) totalWins / totalIters;
+                            double standardDeviation = calculateStandardDeviation(winRate, totalIters);
+                            double confidenceInterval = calculateConfidenceInterval95(standardDeviation);
+
+                            if (totalIters >= MIN_ITERATIONS && standardDeviation <= DEFAULT_STOPPING_SD && confidenceInterval <= DEFAULT_STOPPING_CI) {
+                                // Update global counters and break
+                                heroWins[0] = totalWins;
+                                totalIterations[0] = totalIters;
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+            threads[t].start();
+        }
+        
+        // Wait for all threads to complete
+        for (Thread thread : threads) {
+            try {
+                thread.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Simulation interrupted", e);
+            }
+        }
+        
+        double finalWinRate = (double) heroWins[0] / totalIterations[0];
+        double finalStandardDeviation = calculateStandardDeviation(finalWinRate, totalIterations[0]);
+        double finalConfidenceInterval = calculateConfidenceInterval95(finalStandardDeviation);
+        
+        return new SimulationResult(finalWinRate, finalStandardDeviation, finalConfidenceInterval, totalIterations[0]);
+    }
+    
+    private void validateAndCollectCards(String hand, String playerName, Set<String> removeFromDeck) {
+        if (hand == null || hand.length() != 8) {
+            throw new IllegalArgumentException(playerName + " hand must be exactly 8 characters (4 cards)");
+        }
+        
+        for (int i = 0; i < 4; i++) {
+            String card = hand.substring(i * 2, (i + 1) * 2);
+            
+            // Check if card is valid (exists in full deck)
+            if (!fullDeck.contains(card)) {
+                throw new IllegalArgumentException(playerName + " hand contains invalid card: " + card);
+            }
+            
+            // Check if card is already in removeFromDeck (duplicate)
+            if (!removeFromDeck.add(card)) {
+                throw new IllegalArgumentException("Card " + card + " is used by multiple players");
+            }
+        }
+    }
+    
+    private List<String> createDeckWithoutCards(Set<String> removeFromDeck) {
+        List<String> deck = new ArrayList<>();
+        
+        for (String card : fullDeck) {
+            if (!removeFromDeck.contains(card)) {
+                deck.add(card);
+            }
+        }
+        
+        return deck;
+    }
+    
+    private String dealSequentialHand(List<String> deck, int startIndex, int numCards) {
+        StringBuilder hand = new StringBuilder();
+        for (int i = startIndex; i < startIndex + numCards; i++) {
+            hand.append(deck.get(i));
+        }
+        return hand.toString();
+    }
+    
+    private int evaluatePLOHand(String holeCards, String communityCards) {
+        // Parse hole cards (4 cards)
+        String[] hole = new String[4];
+        for (int i = 0; i < 4; i++) {
+            hole[i] = holeCards.substring(i * 2, (i + 1) * 2);
+        }
+        
+        // Parse community cards (5 cards)
+        String[] community = new String[5];
+        for (int i = 0; i < 5; i++) {
+            community[i] = communityCards.substring(i * 2, (i + 1) * 2);
+        }
+        
+        int bestRank = Integer.MAX_VALUE;
+        
+        // Try all possible 2-card combinations from hole cards
+        for (int i = 0; i < 3; i++) {
+            for (int j = i + 1; j < 4; j++) {
+                String[] holeCombo = {hole[i], hole[j]};
+                
+                // Try all possible 3-card combinations from community cards
+                for (int k = 0; k < 3; k++) {
+                    for (int l = k + 1; l < 4; l++) {
+                        for (int m = l + 1; m < 5; m++) {
+                            String[] communityCombo = {community[k], community[l], community[m]};
+                            
+                            // Combine to make 5-card hand
+                            String[] fiveCardHand = new String[5];
+                            fiveCardHand[0] = holeCombo[0];
+                            fiveCardHand[1] = holeCombo[1];
+                            fiveCardHand[2] = communityCombo[0];
+                            fiveCardHand[3] = communityCombo[1];
+                            fiveCardHand[4] = communityCombo[2];
+                            
+                            // Get rank for this 5-card hand
+                            int rank = handCache.getHandRank(fiveCardHand);
+                            
+                            if (rank < bestRank) {
+                                bestRank = rank;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return bestRank;
+    }
+    
+    private boolean shouldCheckStoppingCriteria(int iteration) {
         if (iteration <= 1000) {
             return iteration % 100 == 0;
         } else if (iteration <= 10000) {
@@ -135,180 +335,31 @@ public class PLOSimulationEngine {
     }
     
     private double calculateStandardDeviation(double winRate, int iterations) {
-        // For binomial distribution, SD = sqrt(p * (1-p) / n)
         return Math.sqrt(winRate * (1 - winRate) / iterations);
     }
     
-    private double calculateConfidenceInterval(double standardDeviation, int iterations) {
-        // 95% confidence interval = 1.96 * standard error
-        // Standard error = standard deviation
-        return 1.96 * standardDeviation;
+    private double calculateConfidenceInterval95(double standardDeviation) {
+        return CONFIDENCE_LEVEL_95 * standardDeviation;
     }
     
-    private boolean validateNoCardConflicts(String heroHand, String[] villainHands) {
-        Set<String> allCards = new HashSet<>();
+    public static void main(String[] args) {
+        PLOSimulationEngine engine = new PLOSimulationEngine();
         
-        // Add hero cards
-        String[] heroCards = parseHand(heroHand);
-        for (String card : heroCards) {
-            if (!allCards.add(card)) {
-                System.err.println("Duplicate card found in hero hand: " + card);
-                return false;
-            }
-        }
+        String heroHand = "2s9s7h2d";
+        List<String> villainHands = new ArrayList<>();
+        // villainHands.add("AsAdAhAc"); // Uncomment to add specific villain hands
         
-        // Add villain cards
-        for (String villainHand : villainHands) {
-            String[] villainCards = parseHand(villainHand);
-            for (String card : villainCards) {
-                if (!allCards.add(card)) {
-                    System.err.println("Card conflict found: " + card + " is used by multiple players");
-                    return false;
-                }
-            }
-        }
+        // Use parallel processing with number of CPU cores
+        int numThreads = Runtime.getRuntime().availableProcessors();
+        System.out.println("Running simulation with " + numThreads + " threads...");
         
-        return true;
-    }
-    
-    private String[] generateRandomVillainHands(String heroHand, int numVillains) {
-        Set<String> usedCards = new HashSet<>();
-        usedCards.addAll(Arrays.asList(parseHand(heroHand)));
-        
-        List<String> availableCards = createDeck(usedCards);
-        Collections.shuffle(availableCards);
-        String[] villainHands = new String[numVillains];
-        
-        for (int i = 0; i < numVillains; i++) {
-            if (availableCards.size() < 4) {
-                throw new RuntimeException("Not enough cards left in deck for villain " + (i + 1));
-            }
-            
-            String[] villainCards = new String[4];
-            for (int j = 0; j < 4; j++) {
-                villainCards[j] = availableCards.remove(0);
-            }
-            
-            villainHands[i] = arrayToString(villainCards);
-        }
-        
-        return villainHands;
-    }
-    
-    private String arrayToString(String[] cards) {
-        StringBuilder sb = new StringBuilder();
-        for (String card : cards) {
-            sb.append(card);
-        }
-        return sb.toString();
-    }
-    
-    private boolean simulateOneHand(String heroHand, String[] villainHands) {
         long startTime = System.currentTimeMillis();
+        SimulationResult result = engine.simulateAdaptive(heroHand, villainHands, numThreads);
+        long endTime = System.currentTimeMillis();
         
-        // Create deck and remove all players' cards
-        Set<String> usedCards = new HashSet<>();
-        usedCards.addAll(Arrays.asList(parseHand(heroHand)));
-        for (String villainHand : villainHands) {
-            usedCards.addAll(Arrays.asList(parseHand(villainHand)));
-        }
-        
-        long deckCreationTime = System.currentTimeMillis();
-        
-        List<String> deck = createDeck(usedCards);
-        Collections.shuffle(deck); // Shuffle once per simulation
-        
-        long shuffleTime = System.currentTimeMillis();
-        
-        // Deal 5 community cards sequentially
-        String[] communityCards = new String[5];
-        for (int i = 0; i < 5; i++) {
-            communityCards[i] = deck.get(i);
-        }
-        
-        long dealTime = System.currentTimeMillis();
-        
-        // Evaluate all hands
-        int heroBestRank = evaluatePLOHand(parseHand(heroHand), communityCards);
-        int[] villainRanks = new int[villainHands.length];
-        
-        for (int i = 0; i < villainHands.length; i++) {
-            villainRanks[i] = evaluatePLOHand(parseHand(villainHands[i]), communityCards);
-        }
-        
-        long evaluationTime = System.currentTimeMillis();
-        
-        // Check if hero wins (lower rank number = better hand)
-        for (int villainRank : villainRanks) {
-            if (villainRank < heroBestRank) {
-                return false; // Hero loses
-            }
-        }
-        return true; // Hero wins or ties
-    }
-    
-    private String[] parseHand(String hand) {
-        if (hand.length() != 8) { // 4 cards * 2 chars each
-            throw new IllegalArgumentException("Hand must be exactly 8 characters: " + hand);
-        }
-        
-        String[] cards = new String[4];
-        for (int i = 0; i < 4; i++) {
-            cards[i] = hand.substring(i * 2, (i + 1) * 2);
-        }
-        return cards;
-    }
-    
-    private List<String> createDeck(Set<String> usedCards) {
-        List<String> deck = new ArrayList<>();
-        for (String rank : ranks) {
-            for (String suit : suits) {
-                String card = rank + suit;
-                if (!usedCards.contains(card)) {
-                    deck.add(card);
-                }
-            }
-        }
-        return deck;
-    }
-    
-    private int evaluatePLOHand(String[] holeCards, String[] communityCards) {
-        if (holeCards.length != 4 || communityCards.length != 5) {
-            throw new IllegalArgumentException("Invalid card counts for PLO evaluation");
-        }
-        
-        int bestRank = Integer.MAX_VALUE;
-        
-        // Try all possible 2-card combinations from hole cards
-        for (int i = 0; i < 3; i++) {
-            for (int j = i + 1; j < 4; j++) {
-                String[] holeCombo = {holeCards[i], holeCards[j]};
-                
-                // Try all possible 3-card combinations from community cards
-                for (int k = 0; k < 3; k++) {
-                    for (int l = k + 1; l < 4; l++) {
-                        for (int m = l + 1; m < 5; m++) {
-                            String[] communityCombo = {communityCards[k], communityCards[l], communityCards[m]};
-                            
-                            // Combine to make 5-card hand
-                            String[] fiveCardHand = new String[5];
-                            fiveCardHand[0] = holeCombo[0];
-                            fiveCardHand[1] = holeCombo[1];
-                            fiveCardHand[2] = communityCombo[0];
-                            fiveCardHand[3] = communityCombo[1];
-                            fiveCardHand[4] = communityCombo[2];
-                            
-                            // Get rank for this 5-card hand
-                            int rank = handCache.getHandRank(fiveCardHand);
-                            if (rank < bestRank) {
-                                bestRank = rank;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        return bestRank;
+        System.out.printf("Win Rate: %.4f%% (SD: %.4f%%, CI: %.4f%%, Iterations: %d)%n", 
+                         result.winRate * 100, result.standardDeviation * 100, 
+                         result.confidenceInterval * 100, result.iterations);
+        System.out.printf("Execution time: %d ms%n", endTime - startTime);
     }
 } 
